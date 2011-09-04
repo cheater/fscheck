@@ -32,6 +32,10 @@ use it from the interpreter. The general operation will look like so:
 '. .. lost+found var etc media cdrom' # and so on
 >>> C.start_check(['/opt']) # check /opt and all subdirs
 
+If the FSCheck's pexpect based communication to debugfs fails very badly, then
+it will fall back to asking you for interactive input. This usually works out
+well and barely ever happens.
+
 You can also interrupt start_check with Ctrl-C and then continue using
 continue_check which you can again interrupt. You might want to do that to
 check the state of the process, for example see what paths are queued up for
