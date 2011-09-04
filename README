@@ -1,0 +1,36 @@
+ABOUT THIS PROGRAM
+
+A consistency check for checking what files were made unavailable by bad
+sectors.
+
+Say you have a disk with bad sectors, you copy the partitions off it using
+gddrescue. You don't know what files were broken or made unavailable by
+directory inodes becoming corrupt. This program scans the directories, starting
+with an initial set (for example the root directory or a list of specific
+directories) and recurs into them, checking for errors. It does not list
+erroneous files.
+
+This program is used as a Python module which you import into the interpreter.
+You instantiate the FSCheck class and feed it a gddrescue log. It uses debugfs
+(the ext3 filesystem debugger interpreter, not the kernel debugging tool)
+through a fairly finicky but surprisingly solid pexpect integration. It is very
+slow because it needs to save out a file for every command! There is no python
+interface for any debugfs-like functionality, alas.
+
+It's fairly conservative with resources, even with 30k files scanned the Python
+interpreter running it takes no more than 50 megabytes memory.
+
+LICENSE
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <http://www.gnu.org/licenses/>.
