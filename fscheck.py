@@ -1,87 +1,89 @@
 #!/usr/bin/python
 """
-NAME
+    NAME
 
-fscheck
-a module for Python
+    fscheck
+    a module for Python
 
-ABOUT THIS PROGRAM
+    ABOUT THIS PROGRAM
 
-A consistency check for checking what files were made unavailable by bad
-sectors.
+    A consistency check for checking what files were made unavailable by bad
+    sectors.
 
-Say you have a disk with bad sectors, you copy the partitions off it using
-gddrescue. You don't know what files were broken or made unavailable by
-directory inodes becoming corrupt. This program scans the directories, starting
-with an initial set (for example the root directory or a list of specific
-directories) and recurs into them, checking for errors. It does not list
-erroneous files.
+    Say you have a disk with bad sectors, you copy the partitions off it using
+    gddrescue. You don't know what files were broken or made unavailable by
+    directory inodes becoming corrupt. This program scans the directories,
+    starting with an initial set (for example the root directory or a list of
+    specific directories) and recurs into them, checking for errors. It does
+    not list erroneous files.
 
-This program is used as a Python module which you import into the interpreter.
-You instantiate the FSCheck class and feed it a gddrescue log. It uses debugfs
-(the ext3 filesystem debugger interpreter, not the kernel debugging tool)
-through a fairly finicky but surprisingly solid pexpect integration. It is very
-slow because it needs to save out a file for every command! There is no python
-interface for any debugfs-like functionality, alas.
+    This program is used as a Python module which you import into the
+    interpreter.  You instantiate the FSCheck class and feed it a gddrescue
+    log. It uses debugfs (the ext3 filesystem debugger interpreter, not the
+    kernel debugging tool) through a fairly finicky but surprisingly solid
+    pexpect integration. It is very slow because it needs to save out a file
+    for every command! There is no python interface for any debugfs-like
+    functionality, alas.
 
-It's fairly conservative with resources, even with 30k files scanned the Python
-interpreter running it takes no more than 50 megabytes memory.
+    It's fairly conservative with resources, even with 30k files scanned
+    the Python interpreter running it takes no more than 50 megabytes memory.
 
-USAGE
+    USAGE
 
-You can either write a wrapper program around the fscheck module, or you can
-use it from the interpreter. The general operation will look like so:
+    You can either write a wrapper program around the fscheck module, or you
+    can use it from the interpreter. Either way, you need to be running the
+    python interpreter as root. The general operation will look like so:
 
->>> import fscheck
->>> B = fscheck.BadBlocks(file('gddrescue.log'))
->>> C = fscheck.FSCheck(B, '/dev/sdf1')
->>> ' '.join(C.dispatch.ls('/'))
-'. .. lost+found var etc media cdrom' # and so on
->>> C.start_check(['/opt']) # check /opt and all subdirs
-^C # Interrupt at any time
->>> C.paths
-[ ... paths queued for checking ... ]
->>> print C.dispatch.cmd('stat "/"') # gets output from debugfs
->>> C.continue_check()
+    >>> import fscheck
+    >>> B = fscheck.BadBlocks(file('gddrescue.log'))
+    >>> C = fscheck.FSCheck(B, '/dev/sdf1')
+    >>> ' '.join(C.dispatch.ls('/'))
+    '. .. lost+found var etc media cdrom' # and so on
+    >>> C.start_check(['/opt']) # check /opt and all subdirs
+    ^C # Interrupt at any time
+    >>> C.paths
+    [ ... paths queued for checking ... ]
+    >>> print C.dispatch.cmd('stat "/"') # gets output from debugfs
+    >>> C.continue_check()
 
-If the FSCheck's pexpect based communication to debugfs fails very badly, then
-it will fall back to asking you for interactive input. This usually works out
-well and barely ever happens.
+    If the FSCheck's pexpect based communication to debugfs fails very badly,
+    then it will fall back to asking you for interactive input. This usually
+    works out well and barely ever happens.
 
-You can also interrupt start_check with Ctrl-C and then continue using
-continue_check which you can again interrupt. You might want to do that to
-check the state of the process, for example see what paths are queued up for
-being checked or what files have been found to have errors in them.
+    You can also interrupt start_check with Ctrl-C and then continue using
+    continue_check which you can again interrupt. You might want to do that
+    to check the state of the process, for example see what paths are queued
+    up for being checked or what files have been found to have errors in them.
 
-If you want to dig deeper you can use the FSCheck.perform_check method which
-is a coroutine/generator that yields control after each file that it tests. The
-generator can be suspended at any time with Ctrl-C, it doesn't lose track of
-the file being processed at the moment.
+    If you want to dig deeper you can use the FSCheck.perform_check method
+    which is a coroutine/generator that yields control after each file
+    that it tests. The generator can be suspended at any time with Ctrl-C,
+    it doesn't lose track of the file being processed at the moment.
 
-Finally, you can use the DebugFSDispatcher class as a direct Python interface
-into ext3 debugfs. It's relatively slow but better than nothing! The cmd method
-returns text, which you have to parse yourself. The text put out by debugfs is
-usually easy to parse. It is useful to make note of the amount of spaces
-between different output columns.
+    Finally, you can use the DebugFSDispatcher class as a direct Python
+    interface into ext3 debugfs. It's relatively slow but better than
+    nothing! The cmd method returns text, which you have to parse yourself. The
+    text put out by debugfs is usually easy to parse. It is useful to make
+    note of the amount of spaces between different output columns.
 
-You can also use BadBlocks as a python interface/parser for gddrescue logs.
-It cannot write out new gddrescue format logs but thanks to the format it is
-super easy to do.
+    You can also use BadBlocks as a python interface/parser for gddrescue logs.
+    It cannot write out new gddrescue format logs but thanks to the format
+    it is super easy to do.
 
-LICENSE
+    LICENSE
 
-This program is free software: you can redistribute it and/or modify
-it under the terms of the GNU General Public License as published by
-the Free Software Foundation, either version 3 of the License, or
-(at your option) any later version.
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
 
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
 
-You should have received a copy of the GNU General Public License
-along with this program.  If not, see <http://www.gnu.org/licenses/>.
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 """
 
 class BadBlocks(object):
