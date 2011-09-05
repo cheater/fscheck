@@ -136,161 +136,14 @@ def rmrf(path):
         elif errno.ENOENT != e.errno:
             raise
 
-CONTINUE = 0
-SUSPEND = 1
-
 import tempfile, os, re, sys, pexpect, time
-class FSCheck(object):
-    """ This class contains info about all the files and also contains the
-        test and traversal logic.
+class DebugFSDispatcher(object):
+    """ This class dispatches all the work to debugfs.
         """
-    def wait_prompt_unsafe(self):
-        self.debugfs.expect('debugfs:  ')
 
-    def wait_prompt(self):
-        """ Wait for the debugfs prompt. """
-        try:
-            self.wait_prompt_unsafe()
-        except pexpect.EOF:
-            self.setup_debugfs_on_error()
-
-    log = sys.stderr
     unnamed_files = []
     deleted_files = []
-    dir_ = None
-    pexpect_retries = 0
-    pexpect_retries_unique = 0
     pexpect_restarts = 0
-
-    def setup_debugfs_on_error(self):
-        """ Use this to restart debugfs when an error happens. Do not use
-            during normal operation.
-            """
-        self.log.write('Restarting debugfs because of an error.\n')
-        self.setup_debugfs()
-        self.pexpect_restarts += 1
-
-    def setup_debugfs(self):
-        """ Sets up a fresh instance of debugfs and the communication dir. """
-        self.debugfs = pexpect.spawn('debugfs %s' % self.partition)
-        self.wait_prompt_unsafe()
-        if self.dir_:
-            rmrf(self.dir_)
-        self.dir_ = tempfile.mkdtemp()
-
-    def __init__(self, bad_blocks, partition):
-        import subprocess
-        if subprocess.call(['test', '-b', partition]) is not 0:
-            raise ValueError(
-                'The path "%s" is not a block special device.' % partition
-                )
-        self.partition = partition
-        self.setup_debugfs()
-        self.bad_blocks = bad_blocks
-
-    def sleep(self, tries):
-        """ Sleeps for a certain amount of time so that pexpect can catch up.
-            """
-        if tries > 0:
-            period = 0.05 * (tries ** 2)
-#             time.sleep(period)
-            try:
-                self.debugfs.expect(pexpect.EOF, timeout=period)
-            except pexpect.TIMEOUT:
-                pass
-
-    def cmd(self, cmd):
-        """ Runs a command which results in the use of a pager, and returns
-            the output as a string.
-            """
-        file_ = os.path.join(self.dir_, 'out')
-        tries = 0
-        if os.path.exists(file_):
-            rmrf(file_)
-        while True:
-            try:
-                self.debugfs.sendline(cmd)
-                self.sleep(tries)
-                self.debugfs.send('s')
-                self.sleep(tries)
-                self.debugfs.sendline(file_)
-                self.sleep(tries)
-                self.debugfs.sendline('q')
-                self.wait_prompt()
-
-                if os.path.exists(file_):
-                    out = file(file_).read()
-                    rmrf(file_)
-                    return out
-            except pexpect.EOF:
-                # Sometimes it just dies because the q was entered in the
-                # interactive context and not in the context of less.
-                self.setup_debugfs_on_error()
-            tries += 1
-            limit = 8
-
-            self.pexpect_retries += 1
-            if tries == 1:
-                self.pexpect_retries_unique += 1
-
-            if tries > limit:
-                self.log.write(
-                    'Aborting after %d tries. Please input path to ' % limit \
-                    + 'file in order to manually override. The command is:\n' \
-                    + '%s\n' % cmd
-                    )
-                while True:
-                    path = raw_input('> ')
-                    if os.path.exists(path):
-                        self.setup_debugfs_on_error()
-                        return file(path).read()
-                    self.log.write(
-                        'Could not find path %s. Please enter a path.\n'
-                        )
-
-            if tries > 2:
-                self.log.write(
-                    'Could not get output data for command:\n%s\n' % cmd \
-                    + 'Retrying, attempt #%d\n' % tries
-                    )
-                self.log.write('Temporary directory:\n%s\nExists: %s\n' % (
-                    self.dir_,
-                    os.path.exists(self.dir_),
-                    ))
-            if tries > 6:
-                self.log.write('Printing more debug info because there were ' \
-                    + 'too many retries.\n'
-                    )
-                try:
-                    self.debugfs.expect(pexpect.EOF, timeout=30)
-                except pexpect.TIMEOUT:
-                    pass
-                self.log.write('Before:\n%s\nAfter:\n%s\n' % (
-                    self.debugfs.before,
-                    self.debugfs.after
-                    ))
-            if tries > 4:
-                self.setup_debugfs_on_error()
-
-    def _old_ls(self, path):
-        """ Returns the filenames of the files inside a directory. """
-        info = self.cmd('ls %s' % path).strip()
-        files = []
-        if info:
-            for line in info.split('\n'):
-                for file_ in line.split('    '):
-                    file_info = file_.split('  ')[1].split(' ')
-                    if len(file_info) == 1:
-                        pass
-                    elif len(file_info) == 2:
-                        files.append(file_info[1])
-                    else:
-                        raise Exception(
-                            'Invalid file identifier. %s for path %s' % (
-                                repr(file_),
-                                path,
-                                ))
-        return files
 
     def ls(self, path):
         """ Returns the filenames of the files inside a directory. """
@@ -373,11 +226,150 @@ class FSCheck(object):
             out['files'] = files
         return out
 
+    def setup_debugfs_on_error(self):
+        """ Use this to restart debugfs when an error happens. Do not use
+            during normal operation.
+            """
+        self.log.write('Restarting debugfs because of an error.\n')
+        self.setup_debugfs()
+        self.pexpect_restarts += 1
+
+    def __init__(self, log, partition):
+        import subprocess
+        if subprocess.call(['test', '-b', partition]) is not 0:
+            raise ValueError(
+                'The path "%s" is not a block special device.' % partition
+                )
+        self.setup_debugfs()
+        self.partition = partition
+
+    def setup_debugfs(self):
+        """ Sets up a fresh instance of debugfs and the communication dir. """
+        self.debugfs = pexpect.spawn('debugfs %s' % self.partition)
+        self.wait_prompt_unsafe()
+        if self.dir_:
+            rmrf(self.dir_)
+        self.dir_ = tempfile.mkdtemp()
+
+    dir_ = None
+    pexpect_retries = 0
+    pexpect_retries_unique = 0
+
+    def wait_prompt_unsafe(self):
+        self.debugfs.expect('debugfs:  ')
+
+    def wait_prompt(self):
+        """ Wait for the debugfs prompt. """
+        try:
+            self.wait_prompt_unsafe()
+        except pexpect.EOF:
+            self.setup_debugfs_on_error()
+
+    def sleep(self, tries):
+        """ Sleeps for a certain amount of time so that pexpect can catch up.
+            """
+        if tries > 0:
+            period = 0.05 * (tries ** 2)
+            try:
+                self.debugfs.expect(pexpect.EOF, timeout=period)
+            except pexpect.TIMEOUT:
+                pass
+
+    def cmd(self, qry):
+        """ Runs a command which results in the use of a pager, and returns
+            the output as a string.
+            """
+        file_ = os.path.join(self.dir_, 'out')
+        tries = 0
+        if os.path.exists(file_):
+            rmrf(file_)
+        while True:
+            try:
+                self.debugfs.sendline(qry)
+                self.sleep(tries)
+                self.debugfs.send('s')
+                self.sleep(tries)
+                self.debugfs.sendline(file_)
+                self.sleep(tries)
+                self.debugfs.sendline('q')
+                self.wait_prompt()
+
+                if os.path.exists(file_):
+                    out = file(file_).read()
+                    rmrf(file_)
+                    return out
+            except pexpect.EOF:
+                # Sometimes it just dies because the q was entered in the
+                # interactive context and not in the context of less.
+                self.setup_debugfs_on_error()
+            tries += 1
+            limit = 8
+
+            self.pexpect_retries += 1
+            if tries == 1:
+                self.pexpect_retries_unique += 1
+
+            if tries > limit:
+                self.log.write(
+                    'Aborting after %d tries. Please input path to ' % limit \
+                    + 'file in order to manually override. The command is:\n' \
+                    + '%s\n' % qry
+                    )
+                while True:
+                    path = raw_input('> ')
+                    if os.path.exists(path):
+                        self.setup_debugfs_on_error()
+                        return file(path).read()
+                    self.log.write(
+                        'Could not find path %s. Please enter a path.\n'
+                        )
+
+            if tries > 2:
+                self.log.write(
+                    'Could not get output data for command:\n%s\n' % qry \
+                    + 'Retrying, attempt #%d\n' % tries
+                    )
+                self.log.write('Temporary directory:\n%s\nExists: %s\n' % (
+                    self.dir_,
+                    os.path.exists(self.dir_),
+                    ))
+            if tries > 6:
+                self.log.write('Printing more debug info because there were ' \
+                    + 'too many retries.\n'
+                    )
+                try:
+                    self.debugfs.expect(pexpect.EOF, timeout=30)
+                except pexpect.TIMEOUT:
+                    pass
+                self.log.write('Before:\n%s\nAfter:\n%s\n' % (
+                    self.debugfs.before,
+                    self.debugfs.after
+                    ))
+            if tries > 4:
+                self.setup_debugfs_on_error()
+
+CONTINUE = 0
+SUSPEND = 1
+
+class FSCheck(object):
+    """ This class contains info about all the files and also contains the
+        test and traversal logic.
+        """
+
+    log = sys.stderr
+
+    def __init__(self, bad_blocks, partition):
+        self.dispatch = DebugFSDispatcher(
+            log=self.log,
+            partition=partition,
+            )
+        self.bad_blocks = bad_blocks
+
     def perform_file_check(self, path):
         """ Checks a single file against bad blocks.
             Returns a list of paths to recurse into if the file is a directory.
             """
-        info = self.get_path_info(path)
+        info = self.dispatch.get_path_info(path)
         ok = True
         bad_blocks = []
         if 'blocks' in info:
@@ -432,6 +424,7 @@ class FSCheck(object):
                 yield CONTINUE
             except KeyboardInterrupt:
                 if path not in self.visited:
+                    # FIXME: move log write out of if
                     self.log.write('Interrupted while processing path:\n%s\n' %
                         path
                         )
@@ -454,15 +447,15 @@ class FSCheck(object):
                 ))
         self.log.write('%spexpect retries: %d\n' % (
             indent,
-            self.pexpect_retries,
+            self.dispatch.pexpect_retries,
             ))
         self.log.write('%sunique pexpect retries: %d\n' % (
             indent,
-            self.pexpect_retries_unique,
+            self.dispatch.pexpect_retries_unique,
             ))
         self.log.write('%spexpect restarts: %d\n' % (
             indent,
-            self.pexpect_restarts,
+            self.dispatch.pexpect_restarts,
             ))
 
     def progress_update(self):
@@ -474,8 +467,8 @@ class FSCheck(object):
         self.progress_done(2)
 
     def output_details(self):
-        unnamed = map('\n '.join, self.unnamed_files)
-        deleted = map('\n '.join, self.deleted_files)
+        unnamed = map('\n '.join, self.dispatch.unnamed_files)
+        deleted = map('\n '.join, self.dispatch.deleted_files)
         self.log.write(
             'Details of erroneous paths:\n' \
             + 'bad:\n%s\n' % '\n'.join(self.bad) \
@@ -488,8 +481,8 @@ class FSCheck(object):
         self.log.write(
             '%spaths: ' % indent \
             + 'bad: %d, ' % len(self.bad) \
-            + 'unnamed: %d, ' % len(self.unnamed_files) \
-            + 'deleted: %d\n' % len(self.deleted_files)
+            + 'unnamed: %d, ' % len(self.dispatch.unnamed_files) \
+            + 'deleted: %d\n' % len(self.dispatch.deleted_files)
             )
 
     def final_update(self):
@@ -536,7 +529,7 @@ class FSCheck(object):
         # Every time the process is interrupted, we need to create a new
         # debugfs instance. If pexpect was interrupted out of, there is no
         # guessing what state debugfs was in, so let's not try to guess at all.
-        self.setup_debugfs()
+        self.dispatch.setup_debugfs()
 
         self.run_check(updates=updates)
         if updates:
