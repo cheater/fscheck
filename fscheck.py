@@ -37,7 +37,8 @@
     >>> import fscheck
     >>> B = fscheck.BadBlocks(file('gddrescue.log'))
     >>> C = fscheck.FSCheck(B, '/dev/sdf1')
-    >>> ' '.join(C.dispatch.ls('/'))
+    >>> ' '.join(C.dispatch.workers[0].ls('/')) # this is not supported,
+                                                # but works for now
     '. .. lost+found var etc media cdrom' # and so on
     >>> C.start_check(['/opt']) # check /opt and all subdirs
     ^C # Interrupt at any time
@@ -148,14 +149,194 @@ def rmrf(path):
         elif errno.ENOENT != e.errno:
             raise
 
+class ListWithTodo(list):
+    todo = 0
+
 import tempfile, os, re, sys, pexpect, time
 class DebugFSDispatcher(object):
     """ This class dispatches all the work to debugfs.
         """
 
+    responses = []
+    queued_comms = ListWithTodo()
+    def path_info_comm(self, path):
+        """ Returns a communication tuple to put in the communication queue.
+            """
+        return (1, 'path_info', [path])
+
+    def queue_path_infos(self, paths):
+        """ Delegates the work for the paths given.
+            """
+        self.queue_comms(map(self.path_info_comm, paths))
+
+    def receive_path_infos(self):
+        """ Receives the results of work done for processing the path infos.
+            """
+        return self.receive_responses('path_info')
+
+    known_responses = {
+        (1, 'pexpect_restart'): None,
+        (1, 'pexpect_retry'): None,
+        (1, 'pexpect_retry_unique'): None,
+        (1, 'path_info'): None,
+        }
+    def receive_responses(self, topic):
+        """ Receives responses on a certain topic.
+            """
+        unused_responses = []
+        responses = []
+        searched_response = (1, topic)
+        while self.responses:
+            response = self.responses.pop()
+            response_id = response[0:2]
+            if searched_response == response_id:
+                responses.append(response[2])
+            else:
+                # This is really a bad place for such a check, maybe this code
+                # should be somewhere else...
+                if response_id not in self.known_responses:
+                    raise UnknownResponse(repr(response))
+                unused_responses.append(response)
+        self.responses.extend(unused_responses)
+        return responses
+    def check_responses(self):
+        """ Checks if the responses are OK.
+            """
+        # FIXME: this and receive_responses aren't most beautiful.
+        self.receive_responses(None)
+
+    def synchronize_workers(self):
+        """ Synchronizes workers.
+
+            This is only needed for synchronous communication where we have to
+            explicitly give the workers some time on the interpreter. In a
+            multiprocessing scheme this is unnecessary since they synchronize
+            themselves because their interpreters run asynchronously to the one
+            running this DebugFSDispatcher.
+            """
+        for worker in self.workers:
+            worker.synchronize()
+
+    def queue_comms(self, cmds):
+        """ Queues commands to be communicated to the workers.
+            """
+        self.queued_comms.extend(cmds)
+        self.queued_comms.todo += len(cmds)
+        self.synchronize_workers()
+
+    def done(self):
+        """ Blocks until all queued communications are processed, then tells
+            the caller whether it was done already.
+            """
+        self.check_responses()
+        if self.responses:
+            return False
+        if self.queued_comms.todo > 0:
+            return False
+        self.join()
+        if self.responses:
+            return False
+        return True
+
+    def join(self):
+        """ Blocks until all incoming commands are processed.
+            """
+        while self.queued_comms.todo > 0:
+            self.synchronize_workers()
+
+    workers = []
+    def reset(self):
+        """ Lets the Dispatcher know that it should set up its workers anew.
+            """
+        self.workers = [
+            DebugFSWrapper(
+                self.log,
+                self.partition,
+                self.responses,
+                self.queued_comms,
+                )
+            for _ in range(1)
+            ]
+
     unnamed_files = []
     deleted_files = []
-    pexpect_restarts = 0
+    _pexpect_restarts = 0 
+    _pexpect_retries = 0
+    _pexpect_retries_unique = 0
+    def get_pexpect_debug_info(self):
+        """ Tells you how pexpect is behaving in the workers.
+            """
+        self._pexpect_restarts += len(
+            self.receive_responses('pexpect_restart')
+            )
+        self._pexpect_retries += len(
+            self.receive_responses('pexpect_retry')
+            )
+        self._pexpect_retries_unique += len(
+            self.receive_responses('pexpect_retry_unique')
+            )
+
+        return {
+            'restarts': self._pexpect_restarts,
+            'retries': self._pexpect_retries,
+            'retries_unique': self._pexpect_retries_unique,
+            }
+
+    def __init__(self, log, partition):
+        import subprocess
+        self.log = log
+        self.partition = partition
+        self.reset()
+
+class UnknownCommunication(ValueError):
+    """ Raised when an unknown communicaton is received.
+        """
+
+class RetryThisCommandException(Exception):
+    """ Raised when a command did not execute properly for some weird reason.
+        """
+
+class DebugFSWrapper(object):
+    """ A wrapper around DebugFS.
+        """
+
+    comms_dispatcher = {}
+    def register_comms(self):
+        """ Creates the API description for the communications.
+            """
+        self.comms_dispatcher.update({
+            (1, 'path_info'): [self.get_path_info, (1, 'path_info')]
+            })
+
+    def dispatch_comm(self, comm):
+        """ Dispatches a communication.
+            """
+        comm_id = comm[0:2]
+        if comm[0] == 1 and comm_id in self.comms_dispatcher:
+            function, identifier = self.comms_dispatcher[comm[0:2]][0:2]
+            try:
+                self.responses.append(identifier + (function(*comm[2]),))
+            except RetryThisCommandException:
+                self.log.write('retrying command.\n')
+                self.setup_debugfs_on_error('Command failed to execute.')
+                self.queued_comms.append(comm)
+            return
+        raise UnknownCommunication(repr(comm))
+
+    def synchronize(self):
+        """ Processes the incoming communications queue. Blocks until the queue
+            is empty.
+            """
+        while self.queued_comms:
+            cmd = self.queued_comms.pop()
+            try:
+                self.dispatch_comm(cmd)
+            except KeyboardInterrupt:
+                self.queued_comms.append(cmd)
+                raise
+
+            self.queued_comms.todo -= 1
+            cmd = None
 
     def ls(self, path):
         """ Returns the filenames of the files inside a directory. """
@@ -200,18 +381,19 @@ class DebugFSDispatcher(object):
                 files: if a directory, this lists the files inside it.
                 }
             """
-        info = self.cmd('stat "%s"' % path)
-        lines = info.split('\n')
+        screen = self.cmd('stat "%s"' % path)
+        lines = screen.split('\n')
         type_matches = re.search('Type: (.*)Mode:', lines[0])
         if not type_matches:
-            raise Exception(
+            raise RetryThisCommandException(
                 'The path %s yielded no correct information screen. ' % path \
-                + 'The output follows:\n%s' % info
+                + 'The output follows:\n%s' % screen
                 )
         type_ = type_matches.groups()[0].rstrip()
         out = {}
+        out['path'] = path
         out['type'] = type_
-        block_matches = re.search('BLOCKS:(.*)TOTAL:', info, re.DOTALL)
+        block_matches = re.search('BLOCKS:(.*)TOTAL:', screen, re.DOTALL)
         if block_matches:
             block_txt = block_matches.groups()[0].strip()
             block_specifiers = [x.split(':')[1] for x in block_txt.split(', ')]
@@ -233,28 +415,49 @@ class DebugFSDispatcher(object):
                 raise Exception(
                     'The file %s has no blocks specified!' % path
                     )
+        out['new_paths'] = []
         if type_ == 'directory':
             files = self.ls(path)
-            out['files'] = files
+            out['new_paths'] = [
+                os.path.join(out['path'], basename)
+                for basename in files
+                if basename not in ['.', '..']
+                ]
         return out
 
-    def setup_debugfs_on_error(self):
+    def dummy_response(self, topic):
+        """ Adds a dummy response with no data.
+            """
+        self.responses.append((1, topic, None,))
+
+    def setup_debugfs_on_error(self, dsc):
         """ Use this to restart debugfs when an error happens. Do not use
             during normal operation.
             """
-        self.log.write('Restarting debugfs because of an error.\n')
+        self.log.write(
+            'Restarting debugfs because of an error: %s\n' % dsc
+            )
         self.setup_debugfs()
-        self.pexpect_restarts += 1
+        self.dummy_response('pexpect_restart')
 
-    def __init__(self, log, partition):
+    def __init__(
+        self,
+        log,
+        partition,
+        responses,
+        queued_comms,
+        ):
         import subprocess
-        if subprocess.call(['test', '-b', partition]) is not 0:
-            raise ValueError(
-                'The path "%s" is not a block special device.' % partition
-                )
+        tests = {'-b': 'a block special device', '-r': 'readable'}
+        for flag, dsc in tests.iteritems():
+            if subprocess.call(['test', flag, partition]) is not 0:
+                raise ValueError('The path "%s" is not %s.' % (partition, dsc))
         self.log = log
         self.partition = partition
+        self.responses = responses
+        self.queued_comms = queued_comms
         self.setup_debugfs()
+        self.register_comms()
 
     def setup_debugfs(self):
         """ Sets up a fresh instance of debugfs and the communication dir. """
@@ -265,8 +468,6 @@ class DebugFSDispatcher(object):
         self.dir_ = tempfile.mkdtemp()
 
     dir_ = None
-    pexpect_retries = 0
-    pexpect_retries_unique = 0
 
     def wait_prompt_unsafe(self):
         self.debugfs.expect('debugfs:  ')
@@ -276,7 +477,9 @@ class DebugFSDispatcher(object):
         try:
             self.wait_prompt_unsafe()
         except pexpect.EOF:
-            self.setup_debugfs_on_error()
+            self.setup_debugfs_on_error(
+                'EOF received while waiting for prompt.'
+                )
 
     def sleep(self, tries):
         """ Sleeps for a certain amount of time so that pexpect can catch up.
@@ -314,13 +517,15 @@ class DebugFSDispatcher(object):
             except pexpect.EOF:
                 # Sometimes it just dies because the q was entered in the
                 # interactive context and not in the context of less.
-                self.setup_debugfs_on_error()
+                self.setup_debugfs_on_error(
+                    'Received EOF while sending commands.'
+                    )
             tries += 1
             limit = 8
 
-            self.pexpect_retries += 1
+            self.dummy_response('pexpect_retry')
             if tries == 1:
-                self.pexpect_retries_unique += 1
+                self.dummy_response('pexpect_retry_unique')
 
             if tries > limit:
                 self.log.write(
@@ -331,7 +536,7 @@ class DebugFSDispatcher(object):
                 while True:
                     path = raw_input('> ')
                     if os.path.exists(path):
-                        self.setup_debugfs_on_error()
+                        self.setup_debugfs_on_error('Manual entry fallback.')
                         return file(path).read()
                     self.log.write(
                         'Could not find path %s. Please enter a path.\n'
@@ -359,7 +564,7 @@ class DebugFSDispatcher(object):
                     self.debugfs.after
                     ))
             if tries > 4:
-                self.setup_debugfs_on_error()
+                self.setup_debugfs_on_error('More than 4 retries.')
 
 CONTINUE = 0
 SUSPEND = 1
@@ -378,11 +583,10 @@ class FSCheck(object):
             )
         self.bad_blocks = bad_blocks
 
-    def perform_file_check(self, path):
+    def file_is_ok(self, info):
         """ Checks a single file against bad blocks.
             Returns a list of paths to recurse into if the file is a directory.
             """
-        info = self.dispatch.get_path_info(path)
         ok = True
         bad_blocks = []
         if 'blocks' in info:
@@ -392,19 +596,14 @@ class FSCheck(object):
                 ]
         if bad_blocks:
             ok = False
-            self.log.write('Found bad blocks in path %s:\n' % path)
+            self.log.write('Found bad blocks in path %s:\n' % info['path'])
             for block in bad_blocks:
                 self.log.write('%d\n' % block)
-        if info['type'] != 'directory':
-            return ok, []
-        if bad_blocks:
+        if info['type'] == 'directory' and bad_blocks:
             self.log.write(
-                'Not recursing into %s because of bad blocks.\n' % path
+                'Not recursing into %s because of bad blocks.\n' % info['path']
                 )
-            return ok, []
-        return ok, [os.path.join(path, basename) for basename in info['files']
-            if basename not in ['.', '..']
-            ]
+        return ok
 
     def perform_check(self, paths):
         """ Checks a file against bad blocks. Recurses into directories, does
@@ -426,22 +625,45 @@ class FSCheck(object):
         self.paths.extend(paths)
         self.visited = []
         self.bad = []
-        while self.paths:
+        while True:
+            if not self.paths and self.dispatch.done():
+                break
+            paths = infos = []
             try:
-                path = self.paths.pop()
-                ok, new_paths = self.perform_file_check(path)
-                if not ok:
-                    self.bad.append(path)
-                self.paths.extend(new_paths)
-                self.visited.append(path)
+                # here we get multiple paths. also depends on how many are
+                # sent out already.
+                paths = [self.paths.pop() for _ in range(1) if self.paths]
+                # here we will send out the paths for processing:
+                self.dispatch.queue_path_infos(paths)
+                # here we will receive fresh info objects:
+                infos = self.dispatch.receive_path_infos()
+                info = None
+                while infos:
+                    info = infos.pop()
+                    if self.file_is_ok(info):
+                        self.paths.extend(info['new_paths'])
+                    else:
+                        self.bad.append(info['path'])
+                    info = None
+                self.visited.extend(paths)
                 yield CONTINUE
             except KeyboardInterrupt:
-                if path not in self.visited:
-                    # FIXME: move log write out of if
-                    self.log.write('Interrupted while processing path:\n%s\n' %
-                        path
-                        )
-                    self.paths.append(path)
+                self.log.write('\nAborting....\n')
+                more_paths = [i['path'] for i in infos]
+                if info:
+                    more_paths.append(info['path'])
+                self.dispatch.join()
+                even_more_paths = [
+                    i['path'] for i in 
+                    self.dispatch.receive_path_infos()
+                    ]
+                all_paths = paths + even_more_paths + more_paths
+                self.log.write('Interrupted while processing paths:\n%s\n' %
+                    '\n'.join(all_paths)
+                    )
+                for path in paths + more_paths:
+                    if path not in self.visited:
+                        self.paths.extend(paths)
                 yield SUSPEND
 
     def progress_done(self, indent_level=0):
@@ -458,18 +680,15 @@ class FSCheck(object):
                 indent,
                 self.paths[-1],
                 ))
-        self.log.write('%spexpect retries: %d\n' % (
-            indent,
-            self.dispatch.pexpect_retries,
-            ))
-        self.log.write('%sunique pexpect retries: %d\n' % (
-            indent,
-            self.dispatch.pexpect_retries_unique,
-            ))
-        self.log.write('%spexpect restarts: %d\n' % (
-            indent,
-            self.dispatch.pexpect_restarts,
-            ))
+        pexpect = self.dispatch.get_pexpect_debug_info()
+        pexpect_labels = {
+            'restarts': 'pexpect restarts',
+            'retries': 'pexpect retries',
+            'retries_unique': 'unique pexpect retries',
+            }
+
+        for k, v in pexpect.iteritems():
+            self.log.write('%s%s: %d\n' % (indent, pexpect_labels[k], v,))
 
     def progress_update(self):
         """ Prints a progress update to stderr. """
@@ -542,7 +761,7 @@ class FSCheck(object):
         # Every time the process is interrupted, we need to create a new
         # debugfs instance. If pexpect was interrupted out of, there is no
         # guessing what state debugfs was in, so let's not try to guess at all.
-        self.dispatch.setup_debugfs()
+        self.dispatch.reset()
 
         self.run_check(updates=updates)
         if updates:
