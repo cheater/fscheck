@@ -37,10 +37,10 @@
     >>> import fscheck
     >>> B = fscheck.BadBlocks(file('gddrescue.log'))
     >>> C = fscheck.FSCheck(B, '/dev/sdf1')
-    >>> ' '.join(C.dispatch.workers[0].ls('/')) # this is not supported,
-                                                # but works for now
+    >>> ' '.join(C.dispatch.workers[0].ls((None, '/')))# this is not supported,
+                                                       # but works for now
     '. .. lost+found var etc media cdrom' # and so on
-    >>> C.start_check(['/opt']) # check /opt and all subdirs
+    >>> C.start_check([(None, '/opt')]) # check /opt and all subdirs
     ^C # Interrupt at any time
     >>> C.paths
     [ ... paths queued for checking ... ]
@@ -327,7 +327,7 @@ class DebugFSWrapper(object):
             try:
                 self.responses.append(identifier + (function(*comm[2]),))
             except RetryThisCommandException:
-                self.log.write('retrying command.\n')
+                self.log.write('retrying command:\n%s\n' % repr(comm))
                 self.setup_debugfs_on_error('Command failed to execute.')
                 self.queued_comms.append(comm)
             return
@@ -350,7 +350,7 @@ class DebugFSWrapper(object):
 
     def ls(self, path):
         """ Returns the filenames of the files inside a directory. """
-        info = self.cmd('ls -p "%s"' % path).strip()
+        info = self.cmd('ls -p %s' % path).strip()
         files = []
         if info:
             for line in info.split('\n'):
@@ -375,7 +375,7 @@ class DebugFSWrapper(object):
                         continue
                     if '/' in file_:
                         file_ = '\/'.join(file_.split('/'))
-                    files.append(file_)
+                    files.append((inode, file_))
                 except IndexError:
                     err = 'Invalid identifier for path %s:\n' % path \
                         + 'Identifier:\n%s\nFile_:\n%s\n' % line, repr(file_)
@@ -383,7 +383,7 @@ class DebugFSWrapper(object):
                     raise Exception(err)
         return files
 
-    def get_path_info(self, path):
+    def get_path_info(self, pathspec):
         """ Gets the info about a file:
             {
                 type: the type of the file
@@ -391,23 +391,29 @@ class DebugFSWrapper(object):
                 files: if a directory, this lists the files inside it.
                 }
             """
-        screen = self.cmd('stat "%s"' % path)
+        if pathspec[0]:
+            path = '<%d>' % pathspec[0]
+        else:
+            path = '"%s"' % pathspec[1]
+        screen = self.cmd('stat %s' % path)
         lines = screen.split('\n')
         type_matches = re.search('Type: (.*)Mode:', lines[0])
         if not type_matches:
             raise RetryThisCommandException(
-                'The path %s yielded no correct information screen. ' % path \
-                + 'The output follows:\n%s' % screen
+                'The path %s yielded no correct information ' % repr(path) \
+                + 'screen. The output follows:\n%s' % screen
                 )
         type_ = type_matches.groups()[0].rstrip()
         out = {}
-        out['path'] = path
+        out['path'] = pathspec
         out['type'] = type_
         block_matches = re.search('BLOCKS:(.*)TOTAL:', screen, re.DOTALL)
         if block_matches:
             block_txt = block_matches.groups()[0].strip()
             block_specifiers = [x.split(':')[1] for x in block_txt.split(', ')]
-            errmsg = 'Invalid block specifier %%s when stating file %s.' % path
+            errmsg = 'Invalid block specifier %%s when stating file %s.' % (
+                repr(pathspec),
+                )
             blocks = []
             for b in block_specifiers:
                 if b.isdigit():
@@ -423,14 +429,14 @@ class DebugFSWrapper(object):
                 out['blocks'] = blocks
             else:
                 raise Exception(
-                    'The file %s has no blocks specified!' % path
+                    'The file %s has no blocks specified!' % repr(pathspec)
                     )
         out['new_paths'] = []
         if type_ == 'directory':
             files = self.ls(path)
             out['new_paths'] = [
-                os.path.join(out['path'], basename)
-                for basename in files
+                (inode, os.path.join(out['path'][1], basename))
+                for inode, basename in files
                 if basename not in ['.', '..']
                 ]
         return out
@@ -492,15 +498,15 @@ class DebugFSWrapper(object):
     def setup_debugfs(self):
         """ Sets up a fresh instance of debugfs and the communication dir. """
         self.debugfs = pexpect.spawn('debugfs %s' % self.partition)
-        self.wait_prompt_unsafe()
+        self.wait_prompt_unsafe(60)
         if self.dir_:
             rmrf(self.dir_)
         self.dir_ = tempfile.mkdtemp()
 
     dir_ = None
 
-    def wait_prompt_unsafe(self):
-        self.debugfs.expect('debugfs:  ')
+    def wait_prompt_unsafe(self, timeout=30):
+        self.debugfs.expect('debugfs:  ', timeout=timeout)
 
     def wait_prompt(self):
         """ Wait for the debugfs prompt. """
@@ -721,8 +727,9 @@ class FSCheck(object):
                     ]
                 all_paths = paths + even_more_paths + more_paths
                 self.log.write('Interrupted while processing paths:\n%s\n' %
-                    '\n'.join(all_paths)
-                    )
+                    '\n'.join(
+                        map(lambda x: ' '.join((repr(x[0]), x[1])), all_paths)
+                        ))
                 for path in paths + more_paths:
                     if path not in self.visited:
                         self.paths.extend(paths)
@@ -842,8 +849,9 @@ class FSCheck(object):
         if updates:
             self.log.write(
                 'Checking paths:\n%s\nand recursing into subdirectories\n' % \
-                    '\n'.join(paths)
-                )
+                    '\n'.join(
+                        map(lambda x: ' '.join((repr(x[0]), x[1])), paths)
+                        ))
         self.progress = self.perform_check(paths)
         self.processed_acc = 0
         self.continue_check(updates=updates)
