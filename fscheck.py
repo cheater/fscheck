@@ -365,20 +365,20 @@ class DebugFSWrapper(object):
                         error = True
                     elif file_ == '':
                         self.log.write(
-                            u'Found file without name:\n%s\n' % line \
-                            + u'while listing the path:\n%s\n' % path \
-                            + u'inode number: %d\n'
+                            'Found file without name:\n%s\n' % line \
+                            + 'while listing the path:\n%s\n' % path \
+                            + 'inode number: %d\n'
                             )
                         self.response('unnamed_file', (path, line))
                         error = True
                     if error:
                         continue
                     if '/' in file_:
-                        file_ = u'\/'.join(file_.split('/'))
+                        file_ = '\/'.join(file_.split('/'))
                     files.append(file_)
                 except IndexError:
-                    err = u'Invalid identifier for path %s:\n' % path \
-                        + u'Identifier:\n%s\nFile_:\n%s\n' % line, repr(file_)
+                    err = 'Invalid identifier for path %s:\n' % path \
+                        + 'Identifier:\n%s\nFile_:\n%s\n' % line, repr(file_)
                     self.log.write(err)
                     raise Exception(err)
         return files
@@ -396,8 +396,8 @@ class DebugFSWrapper(object):
         type_matches = re.search('Type: (.*)Mode:', lines[0])
         if not type_matches:
             raise RetryThisCommandException(
-                u'The path %s yielded no correct information screen. ' % path \
-                + u'The output follows:\n%s' % screen
+                'The path %s yielded no correct information screen. ' % path \
+                + 'The output follows:\n%s' % screen
                 )
         type_ = type_matches.groups()[0].rstrip()
         out = {}
@@ -407,7 +407,7 @@ class DebugFSWrapper(object):
         if block_matches:
             block_txt = block_matches.groups()[0].strip()
             block_specifiers = [x.split(':')[1] for x in block_txt.split(', ')]
-            errmsg = u'Invalid block specifier %%s when stating file %s.' % path
+            errmsg = 'Invalid block specifier %%s when stating file %s.' % path
             blocks = []
             for b in block_specifiers:
                 if b.isdigit():
@@ -423,7 +423,7 @@ class DebugFSWrapper(object):
                 out['blocks'] = blocks
             else:
                 raise Exception(
-                    u'The file %s has no blocks specified!' % path
+                    'The file %s has no blocks specified!' % path
                     )
         out['new_paths'] = []
         if type_ == 'directory':
@@ -450,7 +450,7 @@ class DebugFSWrapper(object):
             during normal operation.
             """
         self.log.write(
-            u'Restarting debugfs because of an error: %s\n' % dsc
+            'Restarting debugfs because of an error: %s\n' % dsc
             )
         self.setup_debugfs()
         self.dummy_response('pexpect_restart')
@@ -481,7 +481,7 @@ class DebugFSWrapper(object):
         tests = {'-b': 'a block special device', '-r': 'readable'}
         for flag, dsc in tests.iteritems():
             if subprocess.call(['test', flag, partition]) is not 0:
-                raise ValueError(u'The path "%s" is not %s.' % (partition, dsc))
+                raise ValueError('The path "%s" is not %s.' % (partition, dsc))
         self.log = log
         self.partition = partition
         self.responses = responses
@@ -559,9 +559,9 @@ class DebugFSWrapper(object):
 
             if tries > limit:
                 self.log.write(
-                    u'Aborting after %d tries. Please input path to ' % limit \
-                    + u'file in order to manually override. The command is:\n' \
-                    + u'%s\n' % qry
+                    'Aborting after %d tries. Please input path to ' % limit \
+                    + 'file in order to manually override. The command is:\n' \
+                    + '%s\n' % qry
                     )
                 while True:
                     path = raw_input('> ')
@@ -569,32 +569,32 @@ class DebugFSWrapper(object):
                         self.setup_debugfs_on_error('Manual entry fallback.')
                         return file(path).read()
                     self.log.write(
-                        u'Could not find path %s. Please enter a path.\n'
+                        'Could not find path %s. Please enter a path.\n'
                         )
 
             if tries > 2:
                 self.log.write(
-                    u'Could not get output data for command:\n%s\n' % qry \
-                    + u'Retrying, attempt #%d\n' % tries
+                    'Could not get output data for command:\n%s\n' % qry \
+                    + 'Retrying, attempt #%d\n' % tries
                     )
-                self.log.write(u'Temporary directory:\n%s\nExists: %s\n' % (
+                self.log.write('Temporary directory:\n%s\nExists: %s\n' % (
                     self.dir_,
                     os.path.exists(self.dir_),
                     ))
             if tries > 6:
-                self.log.write(u'Printing more debug info because there were ' \
-                    + u'too many retries.\n'
+                self.log.write('Printing more debug info because there were ' \
+                    + 'too many retries.\n'
                     )
                 try:
                     self.debugfs.expect(pexpect.EOF, timeout=30)
                 except pexpect.TIMEOUT:
                     pass
-                self.log.write(u'Before:\n%s\nAfter:\n%s\n' % (
+                self.log.write('Before:\n%s\nAfter:\n%s\n' % (
                     self.debugfs.before,
                     self.debugfs.after
                     ))
             if tries > 4:
-                self.setup_debugfs_on_error(u'More than 4 retries.')
+                self.setup_debugfs_on_error('More than 4 retries.')
 
 class DebugFSWrapperWithCat(DebugFSWrapper):
     """ This one uses cat for the pager, making the pexpect interaction easier
@@ -615,7 +615,7 @@ class DebugFSWrapperWithCat(DebugFSWrapper):
             self.debugfs.sendline(qry)
             self.wait_prompt_unsafe()
             out = self.debugfs.before
-            return u'\n'.join(out.split('\n')[1:])
+            return '\n'.join(out.split('\n')[1:])
         except (pexpect.TIMEOUT, pexpect.EOF):
             raise RetryThisCommandException()
 
@@ -636,7 +636,7 @@ class FSCheck(object):
         test and traversal logic.
         """
 
-    log = codecs.getwriter('utf8')(sys.stderr)
+    log = sys.stderr
 
     def __init__(self, bad_blocks, partition):
         self.dispatch = DebugFSDispatcher(
@@ -658,12 +658,12 @@ class FSCheck(object):
                 ]
         if bad_blocks:
             ok = False
-            self.log.write(u'Found bad blocks in path %s:\n' % info['path'])
+            self.log.write('Found bad blocks in path %s:\n' % info['path'])
             for block in bad_blocks:
-                self.log.write(u'%d\n' % block)
+                self.log.write('%d\n' % block)
         if info['type'] == 'directory' and bad_blocks:
             self.log.write(
-                u'Not recursing into %s because of bad blocks.\n' %info['path']
+                'Not recursing into %s because of bad blocks.\n' %info['path']
                 )
         return ok
 
@@ -710,7 +710,7 @@ class FSCheck(object):
                 self.visited.extend(paths)
                 yield CONTINUE
             except KeyboardInterrupt:
-                self.log.write(u'\nAborting....\n')
+                self.log.write('\nAborting....\n')
                 more_paths = [i['path'] for i in infos]
                 if info:
                     more_paths.append(info['path'])
@@ -720,8 +720,8 @@ class FSCheck(object):
                     self.dispatch.receive_path_infos()
                     ]
                 all_paths = paths + even_more_paths + more_paths
-                self.log.write(u'Interrupted while processing paths:\n%s\n' %
-                    u'\n'.join(all_paths)
+                self.log.write('Interrupted while processing paths:\n%s\n' %
+                    '\n'.join(all_paths)
                     )
                 for path in paths + more_paths:
                     if path not in self.visited:
@@ -731,13 +731,13 @@ class FSCheck(object):
     def progress_done(self, indent_level=0):
         """ Prints information about the files that have been checked. """
         indent = ' ' * indent_level
-        format_ = u'%sDone: %%s\n' % indent
+        format_ = '%sDone: %%s\n' % indent
         self.log.write(format_ % (
             len(self.visited),
             ))
         self.erroneous_path_stats(indent_level)
         if self.paths:
-            self.log.write(u'%sNext path:\n%s%s\n' % (
+            self.log.write('%sNext path:\n%s%s\n' % (
                 indent,
                 indent,
                 self.paths[-1],
@@ -750,11 +750,11 @@ class FSCheck(object):
             }
 
         for k, v in pexpect.iteritems():
-            self.log.write(u'%s%s: %d\n' % (indent, pexpect_labels[k], v,))
+            self.log.write('%s%s: %d\n' % (indent, pexpect_labels[k], v,))
 
     def progress_update(self):
         """ Prints a progress update to stderr. """
-        format_ = u'Queued: %s\n'
+        format_ = 'Queued: %s\n'
         self.log.write(format_ % (
             len(self.paths),
             ))
@@ -762,33 +762,33 @@ class FSCheck(object):
 
     def output_details(self):
         suspect = self.dispatch.get_suspect_files()
-        unnamed = map(u'\n '.join, suspect['unnamed'])
-        deleted = map(u'\n '.join, suspect['deleted'])
+        unnamed = map('\n '.join, suspect['unnamed'])
+        deleted = map('\n '.join, suspect['deleted'])
         self.log.write(
-            u'Details of erroneous paths:\n' \
-            + u'bad:\n%s\n' % '\n'.join(self.bad) \
-            + u'unnamed:\n%s\n' % '\n'.join(unnamed) \
-            + u'deleted:\n%s\n' % '\n'.join(deleted)
+            'Details of erroneous paths:\n' \
+            + 'bad:\n%s\n' % '\n'.join(self.bad) \
+            + 'unnamed:\n%s\n' % '\n'.join(unnamed) \
+            + 'deleted:\n%s\n' % '\n'.join(deleted)
             )
 
     def erroneous_path_stats(self, indent_level):
         suspect = self.dispatch.get_suspect_files()
         indent = ' ' * indent_level
         self.log.write(
-            u'%spaths: ' % indent \
-            + u'bad: %d, ' % len(self.bad) \
-            + u'unnamed: %d, ' % len(suspect['unnamed']) \
-            + u'deleted: %d\n' % len(suspect['deleted'])
+            '%spaths: ' % indent \
+            + 'bad: %d, ' % len(self.bad) \
+            + 'unnamed: %d, ' % len(suspect['unnamed']) \
+            + 'deleted: %d\n' % len(suspect['deleted'])
             )
 
     def final_update(self):
         """ The information shown after the check is done. """
-        self.log.write(u'\nFinished.\n')
+        self.log.write('\nFinished.\n')
         self.progress_done()
         if self.bad:
-            self.log.write(u'Found %d bad files.\n' % len(self.bad))
+            self.log.write('Found %d bad files.\n' % len(self.bad))
         else:
-            self.log.write(u'No bad files found.\n')
+            self.log.write('No bad files found.\n')
         self.output_details()
 
 
@@ -805,7 +805,7 @@ class FSCheck(object):
             elif status == CONTINUE:
                 continue
             raise Exception(
-                u'Coroutine returned invalid status %s\n' % repr(status)
+                'Coroutine returned invalid status %s\n' % repr(status)
                 )
 
     interrupted = False
@@ -817,7 +817,7 @@ class FSCheck(object):
             updates - whether to print updates or not.
             """
         if self.interrupted:
-            self.log.write(u'Resuming on path:\n%s\n' %
+            self.log.write('Resuming on path:\n%s\n' %
                 self.paths[-1]
                 )
         self.interrupted = True
@@ -841,8 +841,8 @@ class FSCheck(object):
             """
         if updates:
             self.log.write(
-                u'Checking paths:\n%s\nand recursing into subdirectories\n' % \
-                    u'\n'.join(paths)
+                'Checking paths:\n%s\nand recursing into subdirectories\n' % \
+                    '\n'.join(paths)
                 )
         self.progress = self.perform_check(paths)
         self.processed_acc = 0
