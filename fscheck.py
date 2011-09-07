@@ -152,7 +152,7 @@ def rmrf(path):
 class ListWithTodo(list):
     todo = 0
 
-import tempfile, os, re, sys, pexpect, time
+import tempfile, os, re, sys, pexpect, time, subprocess
 class DebugFSDispatcher(object):
     """ This class dispatches all the work to debugfs.
         """
@@ -179,6 +179,8 @@ class DebugFSDispatcher(object):
         (1, 'pexpect_retry'): None,
         (1, 'pexpect_retry_unique'): None,
         (1, 'path_info'): None,
+        (1, 'deleted_file'): None,
+        (1, 'unnamed_file'): None,
         }
     def receive_responses(self, topic):
         """ Receives responses on a certain topic.
@@ -192,7 +194,7 @@ class DebugFSDispatcher(object):
             if searched_response == response_id:
                 responses.append(response[2])
             else:
-                # This is really a bad place for such a check, maybe this code
+                # This may be a bad place for such a check, maybe this code
                 # should be somewhere else...
                 if response_id not in self.known_responses:
                     raise UnknownResponse(repr(response))
@@ -249,7 +251,7 @@ class DebugFSDispatcher(object):
         """ Lets the Dispatcher know that it should set up its workers anew.
             """
         self.workers = [
-            DebugFSWrapper(
+            DebugFSWrapperWithCat(
                 self.log,
                 self.partition,
                 self.responses,
@@ -258,9 +260,18 @@ class DebugFSDispatcher(object):
             for _ in range(1)
             ]
 
-    unnamed_files = []
-    deleted_files = []
-    _pexpect_restarts = 0 
+    _deleted_files = []
+    _unnamed_files = []
+    def get_suspect_files(self):
+        """ Gets the list of encountered files without name and deleted files.
+            """
+        self._deleted_files.extend( self.receive_responses('deleted_file'))
+        self._unnamed_files.extend( self.receive_responses('unnamed_file'))
+        return {
+            'unnamed': self._unnamed_files,
+            'deleted': self._deleted_files,
+            }
+    _pexpect_restarts = 0
     _pexpect_retries = 0
     _pexpect_retries_unique = 0
     def get_pexpect_debug_info(self):
@@ -283,7 +294,6 @@ class DebugFSDispatcher(object):
             }
 
     def __init__(self, log, partition):
-        import subprocess
         self.log = log
         self.partition = partition
         self.reset()
@@ -350,16 +360,16 @@ class DebugFSWrapper(object):
                     inode = int(first_split[1])
                     file_ = first_split[-1].rsplit('/', 2)[0]
                     error = False
-                    if file_ == '':
+                    if inode == 0:
+                        self.response('deleted_file', (path, line))
+                        error = True
+                    elif file_ == '':
                         self.log.write(
                             'Found file without name:\n%s\n' % line \
                             + 'while listing the path:\n%s\n' % path \
                             + 'inode number: %d\n'
                             )
-                        self.unnamed_files.append((path, line))
-                        error = True
-                    if inode == 0:
-                        self.deleted_files.append((path, line))
+                        self.response('unnamed_file', (path, line))
                         error = True
                     if error:
                         continue
@@ -425,10 +435,15 @@ class DebugFSWrapper(object):
                 ]
         return out
 
+    def response(self, topic, content):
+        """ Adds a response.
+            """
+        self.responses.append((1, topic, content,))
+
     def dummy_response(self, topic):
         """ Adds a dummy response with no data.
             """
-        self.responses.append((1, topic, None,))
+        self.response(topic, None,)
 
     def setup_debugfs_on_error(self, dsc):
         """ Use this to restart debugfs when an error happens. Do not use
@@ -440,14 +455,29 @@ class DebugFSWrapper(object):
         self.setup_debugfs()
         self.dummy_response('pexpect_restart')
 
+    def which(self, what):
+        """ Runs the which command to expand paths to programs.
+            """
+        which = subprocess.Popen(
+            ['which', what],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            )
+        path = which.stdout.read().strip() 
+        return path
+
     def __init__(
         self,
         log,
         partition,
         responses,
         queued_comms,
+        pager=None,
         ):
-        import subprocess
+        if not pager:
+            pager = self.which('less')
+        os.environ['DEBUGFS_PAGER'] = pager
         tests = {'-b': 'a block special device', '-r': 'readable'}
         for flag, dsc in tests.iteritems():
             if subprocess.call(['test', flag, partition]) is not 0:
@@ -565,6 +595,37 @@ class DebugFSWrapper(object):
                     ))
             if tries > 4:
                 self.setup_debugfs_on_error('More than 4 retries.')
+
+class DebugFSWrapperWithCat(DebugFSWrapper):
+    """ This one uses cat for the pager, making the pexpect interaction easier
+        and faster at the same time.
+        """
+
+    def setup_debugfs(self, *args, **kwargs):
+        """ Sets up a fresh instance of debugfs and the communication dir. """
+        out = super(DebugFSWrapperWithCat, self).setup_debugfs(*args, **kwargs)
+        self.debugfs.delaybeforesend = 0
+        return out
+
+    def cmd(self, qry):
+        """ Runs a command which results in the use of a pager, and returns
+            the output as a string.
+            """
+        try:
+            self.debugfs.sendline(qry)
+            self.wait_prompt_unsafe()
+            out = self.debugfs.before
+            return '\n'.join(out.split('\n')[1:])
+        except (pexpect.TIMEOUT, pexpect.EOF):
+            raise RetryThisCommandException()
+
+    def __init__(self, *args, **kwargs):
+        """ Among others we need to set the env var DEBUGFS_PAGER to the path
+            to the cat binary.
+            """
+        kwargs['pager'] = self.which('cat')
+        return super(DebugFSWrapperWithCat, self).__init__(*args, **kwargs)
+
 
 CONTINUE = 0
 SUSPEND = 1
@@ -699,8 +760,9 @@ class FSCheck(object):
         self.progress_done(2)
 
     def output_details(self):
-        unnamed = map('\n '.join, self.dispatch.unnamed_files)
-        deleted = map('\n '.join, self.dispatch.deleted_files)
+        suspect = self.dispatch.get_suspect_files()
+        unnamed = map('\n '.join, suspect['unnamed'])
+        deleted = map('\n '.join, suspect['deleted'])
         self.log.write(
             'Details of erroneous paths:\n' \
             + 'bad:\n%s\n' % '\n'.join(self.bad) \
@@ -709,12 +771,13 @@ class FSCheck(object):
             )
 
     def erroneous_path_stats(self, indent_level):
+        suspect = self.dispatch.get_suspect_files()
         indent = ' ' * indent_level
         self.log.write(
             '%spaths: ' % indent \
             + 'bad: %d, ' % len(self.bad) \
-            + 'unnamed: %d, ' % len(self.dispatch.unnamed_files) \
-            + 'deleted: %d\n' % len(self.dispatch.deleted_files)
+            + 'unnamed: %d, ' % len(suspect['unnamed']) \
+            + 'deleted: %d\n' % len(suspect['deleted'])
             )
 
     def final_update(self):
