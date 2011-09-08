@@ -35,9 +35,10 @@ python interpreter as root. The general operation will look like so:
 >>> import fscheck
 >>> B = fscheck.BadBlocks(file('gddrescue.log'))
 >>> C = fscheck.FSCheck(B, '/dev/sdf1')
->>> ' '.join(C.dispatch.ls('/'))
+>>> ' '.join(C.dispatch.workers[0].ls((None, '/')))# this is not supported,
+						# but works for now
 '. .. lost+found var etc media cdrom' # and so on
->>> C.start_check(['/opt']) # check /opt and all subdirs
+>>> C.start_check([(None, '/opt')]) # check /opt and all subdirs
 ^C # Interrupt at any time
 >>> C.paths
 [ ... paths queued for checking ... ]
