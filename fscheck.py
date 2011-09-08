@@ -21,8 +21,7 @@
     interpreter.  You instantiate the FSCheck class and feed it a gddrescue
     log. It uses debugfs (the ext3 filesystem debugger interpreter, not the
     kernel debugging tool) through a fairly finicky but surprisingly solid
-    pexpect integration. It is very slow because it needs to save out a file
-    for every command! There is no python interface for any debugfs-like
+    pexpect integration. There is no python interface for any debugfs-like
     functionality, alas.
 
     It's fairly conservative with resources, even with 30k files scanned
@@ -47,10 +46,6 @@
     >>> print C.dispatch.workers[0].cmd('stat "/"') # also not supported. 
                                             # gets output from debugfs.
     >>> C.continue_check()
-
-    If the FSCheck's pexpect based communication to debugfs fails very badly,
-    then it will fall back to asking you for interactive input. This usually
-    works out well and barely ever happens.
 
     You can also interrupt start_check with Ctrl-C and then continue using
     continue_check which you can again interrupt. You might want to do that
