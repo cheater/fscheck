@@ -37,14 +37,15 @@
     >>> import fscheck
     >>> B = fscheck.BadBlocks(file('gddrescue.log'))
     >>> C = fscheck.FSCheck(B, '/dev/sdf1')
-    >>> ' '.join(C.dispatch.workers[0].ls((None, '/')))# this is not supported,
-                                                       # but works for now
+    >>> ' '.join(map(lambda x: x[1], C.dispatch.workers[0].ls((None, '/'))))
+    # ^ this is not supported, but works for now
     '. .. lost+found var etc media cdrom' # and so on
     >>> C.start_check([(None, '/opt')]) # check /opt and all subdirs
     ^C # Interrupt at any time
     >>> C.paths
     [ ... paths queued for checking ... ]
-    >>> print C.dispatch.cmd('stat "/"') # gets output from debugfs
+    >>> print C.dispatch.workers[0].cmd('stat "/"') # also not supported. 
+                                            # gets output from debugfs.
     >>> C.continue_check()
 
     If the FSCheck's pexpect based communication to debugfs fails very badly,
@@ -288,7 +289,7 @@ class DebugFSDispatcher(object):
         """ Lets the Dispatcher know that it should set up its workers anew.
             """
         self.workers = [
-            DebugFSWrapperWithCat(
+            DebugFSWrapper(
                 self.log,
                 self.partition,
                 self.responses,
@@ -561,7 +562,7 @@ class DebugFSWrapper(object):
         pager=None,
         ):
         if not pager:
-            pager = self.which('less')
+            pager = self.which('cat')
         os.environ['DEBUGFS_PAGER'] = pager
         tests = {'-b': 'a block special device', '-r': 'readable'}
         for flag, dsc in tests.iteritems():
@@ -578,9 +579,7 @@ class DebugFSWrapper(object):
         """ Sets up a fresh instance of debugfs and the communication dir. """
         self.debugfs = pexpect.spawn('debugfs %s' % self.partition)
         self.wait_prompt_unsafe(60)
-        if self.dir_:
-            rmrf(self.dir_)
-        self.dir_ = tempfile.mkdtemp()
+        self.debugfs.delaybeforesend = 0
 
     dir_ = None
 
@@ -610,92 +609,6 @@ class DebugFSWrapper(object):
         """ Runs a command which results in the use of a pager, and returns
             the output as a string.
             """
-        file_ = os.path.join(self.dir_, 'out')
-        tries = 0
-        if os.path.exists(file_):
-            rmrf(file_)
-        while True:
-            try:
-                self.debugfs.sendline(qry)
-                self.sleep(tries)
-                self.debugfs.send('s')
-                self.sleep(tries)
-                self.debugfs.sendline(file_)
-                self.sleep(tries)
-                self.debugfs.sendline('q')
-                self.wait_prompt()
-
-                if os.path.exists(file_):
-                    out = file(file_).read()
-                    rmrf(file_)
-                    return out
-            except pexpect.EOF:
-                # Sometimes it just dies because the q was entered in the
-                # interactive context and not in the context of less.
-                self.setup_debugfs_on_error(
-                    'Received EOF while sending commands.'
-                    )
-            tries += 1
-            limit = 8
-
-            self.dummy_response('pexpect_retry')
-            if tries == 1:
-                self.dummy_response('pexpect_retry_unique')
-
-            if tries > limit:
-                self.log.write(
-                    'Aborting after %d tries. Please input path to ' % limit \
-                    + 'file in order to manually override. The command is:\n' \
-                    + '%s\n' % qry
-                    )
-                while True:
-                    path = raw_input('> ')
-                    if os.path.exists(path):
-                        self.setup_debugfs_on_error('Manual entry fallback.')
-                        return file(path).read()
-                    self.log.write(
-                        'Could not find path %s. Please enter a path.\n'
-                        )
-
-            if tries > 2:
-                self.log.write(
-                    'Could not get output data for command:\n%s\n' % qry \
-                    + 'Retrying, attempt #%d\n' % tries
-                    )
-                self.log.write('Temporary directory:\n%s\nExists: %s\n' % (
-                    self.dir_,
-                    os.path.exists(self.dir_),
-                    ))
-            if tries > 6:
-                self.log.write('Printing more debug info because there were ' \
-                    + 'too many retries.\n'
-                    )
-                try:
-                    self.debugfs.expect(pexpect.EOF, timeout=30)
-                except pexpect.TIMEOUT:
-                    pass
-                self.log.write('Before:\n%s\nAfter:\n%s\n' % (
-                    self.debugfs.before,
-                    self.debugfs.after
-                    ))
-            if tries > 4:
-                self.setup_debugfs_on_error('More than 4 retries.')
-
-class DebugFSWrapperWithCat(DebugFSWrapper):
-    """ This one uses cat for the pager, making the pexpect interaction easier
-        and faster at the same time.
-        """
-
-    def setup_debugfs(self, *args, **kwargs):
-        """ Sets up a fresh instance of debugfs and the communication dir. """
-        out = super(DebugFSWrapperWithCat, self).setup_debugfs(*args, **kwargs)
-        self.debugfs.delaybeforesend = 0
-        return out
-
-    def cmd(self, qry):
-        """ Runs a command which results in the use of a pager, and returns
-            the output as a string.
-            """
         try:
             self.debugfs.sendline(qry)
             self.wait_prompt_unsafe()
@@ -703,14 +616,6 @@ class DebugFSWrapperWithCat(DebugFSWrapper):
             return '\n'.join(out.split('\n')[1:])
         except (pexpect.TIMEOUT, pexpect.EOF):
             raise RetryThisCommandException()
-
-    def __init__(self, *args, **kwargs):
-        """ Among others we need to set the env var DEBUGFS_PAGER to the path
-            to the cat binary.
-            """
-        kwargs['pager'] = self.which('cat')
-        return super(DebugFSWrapperWithCat, self).__init__(*args, **kwargs)
-
 
 CONTINUE = 0
 SUSPEND = 1
@@ -945,11 +850,15 @@ class FSCheck(object):
             self.final_update()
 
     def start_check(self, paths, updates=True):
-        """ Start a check from the path given and recurse into directories.
+        """ Start a check from the paths given and recurse into directories.
             You can use a KeyboardInterrupt (^C) to break out of this, and
             then resume the check with continue_check.()
             Parameters:
-            path - the path to check
+            path - the paths to check. A list of pairs of the form (inode,
+                   path,) where the inode is a string or None, and the path
+                   is a string. The string must point to the inode given if
+                   the inode is not None. Inode numbers are supported only
+                   for speeding up the lookup process.
             updates - whether to print progress updates
             """
         if updates:
