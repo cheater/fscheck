@@ -137,6 +137,42 @@ class BadBlocks(object):
                         'higher numbers than the block being tested.'
                         )
                 return {'+': True, '-': False}[self.lines[i-1][2]]
+    def intersect(self, starta, enda, startb, endb):
+        """ Intersects two ranges.
+            """
+        if starta < endb and enda > startb:
+            range_start = starta
+            if starta < startb:
+                range_start = startb
+            range_end = enda
+            if enda > endb:
+                range_end = endb
+
+            return range_start, range_end
+        return None
+    def expand_range(self, range):
+        start, end = range
+        if start > end:
+            raise ValueError('The start must be less than the end or equal.')
+        return range(start, end+1)
+
+    def block_range_ok(self, block_range):
+        """ Checks whether a given block range (a pair of integers) contains
+            bad blocks. Returns a list of bad block numbers.
+            """
+        start, end = block_range
+        if start > end:
+            raise ValueError('The start must be less than the end or equal.')
+        ranges = []
+        for line_start, line_end, line_type in self.lines:
+            if line_type in ['+']:
+                continue
+            intersection = self.intersect(start, end, line_start, line_end)
+            if intersection:
+                ranges.append(intersection)
+        L = map(self.expand_range, ranges)
+        block_list = [L for L in L for L in L]
+        return block_list
 
 def rmrf(path):
     """ Kinda like rm -rf. """
@@ -181,6 +217,7 @@ class DebugFSDispatcher(object):
         (1, 'path_info'): None,
         (1, 'deleted_file'): None,
         (1, 'unnamed_file'): None,
+        (1, 'bad_file'): None,
         }
     def receive_responses(self, topic):
         """ Receives responses on a certain topic.
@@ -326,7 +363,8 @@ class DebugFSWrapper(object):
             function, identifier = self.comms_dispatcher[comm[0:2]][0:2]
             try:
                 self.responses.append(identifier + (function(*comm[2]),))
-            except RetryThisCommandException:
+            except RetryThisCommandException, e:
+                self.log.write('%s\n' % repr(e))
                 self.log.write('retrying command:\n%s\n' % repr(comm))
                 self.setup_debugfs_on_error('Command failed to execute.')
                 self.queued_comms.append(comm)
@@ -350,9 +388,17 @@ class DebugFSWrapper(object):
 
     def ls(self, path):
         """ Returns the filenames of the files inside a directory. """
-        info = self.cmd('ls -p %s' % path).strip()
+        path_str = '"%s"' % path[1]
+        if path[0]:
+            path_str = '<%d>' % path[0]
+        info = self.cmd('ls -p %s' % path_str).strip()
         files = []
         if info:
+            dir_corrupt = '-p: EXT2 directory corrupted'
+            if info == dir_corrupt:
+                self.response('bad_file', [path, dir_corrupt])
+                self.log.write('Found corrupt dir:\n%s\n' % repr(path))
+                return []
             for line in info.split('\n'):
                 file_ = None
                 try:
@@ -366,7 +412,7 @@ class DebugFSWrapper(object):
                     elif file_ == '':
                         self.log.write(
                             'Found file without name:\n%s\n' % line \
-                            + 'while listing the path:\n%s\n' % path \
+                            + 'while listing the path:\n%s\n' % repr(path) \
                             + 'inode number: %d\n'
                             )
                         self.response('unnamed_file', (path, line))
@@ -377,11 +423,44 @@ class DebugFSWrapper(object):
                         file_ = '\/'.join(file_.split('/'))
                     files.append((inode, file_))
                 except IndexError:
-                    err = 'Invalid identifier for path %s:\n' % path \
-                        + 'Identifier:\n%s\nFile_:\n%s\n' % line, repr(file_)
+                    err = 'Invalid identifier for path %s:\n' % repr(path) \
+                        + 'Identifier:\n%s\nFile_:\n%s\n' %(line, repr(file_))\
+                        + 'info:\n%s\n' % repr(info)
                     self.log.write(err)
                     raise Exception(err)
         return files
+
+    def process_block_specifiers(self, block_specifiers, ranges=True):
+        """ Processes block specifiers from text to integer form.
+            """
+        blocks = []
+        for b in block_specifiers:
+            if b.isdigit():
+                t2 = t = int(b)
+                if ranges:
+                    t2 = (t, t)
+                blocks.append(t2)
+            elif '-' in b:
+                pr = b.split('-')
+                if len(pr) > 2 or not all(el.isdigit() for el in pr):
+                    raise Exception(errmsg % b)
+                if ranges:
+                    blocks.append((int(pr[0]), int(pr[1])))
+                else:
+                    blocks.extend(xrange(int(pr[0]), int(pr[1]) + 1))
+            else:
+                raise Exception(errmsg % b)
+        return blocks
+
+    def flatten_block_specifiers(self, block_specifiers):
+        """ Returns a list of single blocks from the block specifiers.
+            """
+        return self.process_block_specifiers(block_specifiers, ranges=False)
+
+    def block_ranges_from_specifiers(self, block_specifiers):
+        """ Returns a list of block ranges from the block specifiers.
+            """
+        return self.process_block_specifiers(block_specifiers)
 
     def get_path_info(self, pathspec):
         """ Gets the info about a file:
@@ -397,6 +476,11 @@ class DebugFSWrapper(object):
             path = '"%s"' % pathspec[1]
         screen = self.cmd('stat %s' % path)
         lines = screen.split('\n')
+        invalid = False
+        if lines[0].strip().startswith('invalid'):
+            self.response('bad_file', [pathspec, lines[0]])
+            lines = lines[1:]
+            invalid = True
         type_matches = re.search('Type: (.*)Mode:', lines[0])
         if not type_matches:
             raise RetryThisCommandException(
@@ -407,6 +491,9 @@ class DebugFSWrapper(object):
         out = {}
         out['path'] = pathspec
         out['type'] = type_
+        out['new_paths'] = []
+        if invalid:
+            return out
         block_matches = re.search('BLOCKS:(.*)TOTAL:', screen, re.DOTALL)
         if block_matches:
             block_txt = block_matches.groups()[0].strip()
@@ -414,26 +501,18 @@ class DebugFSWrapper(object):
             errmsg = 'Invalid block specifier %%s when stating file %s.' % (
                 repr(pathspec),
                 )
-            blocks = []
-            for b in block_specifiers:
-                if b.isdigit():
-                    blocks.append(int(b))
-                elif '-' in b:
-                    pr = b.split('-')
-                    if len(pr) > 2 or not all(el.isdigit() for el in pr):
-                        raise Exception(errmsg % b)
-                    blocks.extend(xrange(int(pr[0]), int(pr[1]) + 1))
-                else:
-                    raise Exception(errmsg % b)
+            blocks = self.flatten_block_specifiers(block_specifiers)
             if blocks:
                 out['blocks'] = blocks
+            block_ranges = self.block_ranges_from_specifiers(block_specifiers)
+            if block_ranges:
+                out['block_ranges'] = block_ranges
             else:
                 raise Exception(
                     'The file %s has no blocks specified!' % repr(pathspec)
                     )
-        out['new_paths'] = []
         if type_ == 'directory':
-            files = self.ls(path)
+            files = self.ls(pathspec)
             out['new_paths'] = [
                 (inode, os.path.join(out['path'][1], basename))
                 for inode, basename in files
@@ -651,17 +730,41 @@ class FSCheck(object):
             )
         self.bad_blocks = bad_blocks
 
-    def file_is_ok(self, info):
-        """ Checks a single file against bad blocks.
-            Returns a list of paths to recurse into if the file is a directory.
+    def old_check_bad_blocks(self, info):
+        """ Checks if the file has bad blocks.
+            note: when removing this, also remove generation of info[blocks]
             """
-        ok = True
         bad_blocks = []
         if 'blocks' in info:
             bad_blocks = [
                 block for block in info['blocks'] if
                 not self.bad_blocks.block_ok(block)
                 ]
+        return bad_blocks
+
+    def check_bad_blocks(self, info):
+        """ Checks if the file has bad blocks.
+            """
+        bad_blocks = []
+        if 'block_ranges' in info:
+            bad_ranges = [
+                self.bad_blocks.block_range_ok(range)
+                for range in info['block_ranges']
+                ]
+            block_lists = map(
+                lambda x: list(range(x[0], x[1]+1)),
+                [range_ for range_ in bad_ranges if range_]
+                )
+            bad_blocks = [L for L in block_lists for L in L]
+        return bad_blocks
+
+
+    def file_is_ok(self, info):
+        """ Checks a single file against bad blocks.
+            Returns a list of paths to recurse into if the file is a directory.
+            """
+        ok = True
+        bad_blocks = self.check_bad_blocks(info)
         if bad_blocks:
             ok = False
             self.log.write('Found bad blocks in path %s:\n' % info['path'])
@@ -697,6 +800,7 @@ class FSCheck(object):
             if not self.paths and self.dispatch.done():
                 break
             paths = infos = []
+            info = None
             try:
                 # here we get multiple paths. also depends on how many are
                 # sent out already.
@@ -714,9 +818,11 @@ class FSCheck(object):
                         self.bad.append(info['path'])
                     info = None
                 self.visited.extend(paths)
+                self.bad.extend(self.dispatch.receive_responses('bad_file'))
                 yield CONTINUE
             except KeyboardInterrupt:
                 self.log.write('\nAborting....\n')
+                self.bad.extend(self.dispatch.receive_responses('bad_file'))
                 more_paths = [i['path'] for i in infos]
                 if info:
                     more_paths.append(info['path'])
@@ -769,8 +875,8 @@ class FSCheck(object):
 
     def output_details(self):
         suspect = self.dispatch.get_suspect_files()
-        unnamed = map('\n '.join, suspect['unnamed'])
-        deleted = map('\n '.join, suspect['deleted'])
+        unnamed = map('\n '.join, map(repr, suspect['unnamed']))
+        deleted = map('\n '.join, map(repr, suspect['deleted']))
         self.log.write(
             'Details of erroneous paths:\n' \
             + 'bad:\n%s\n' % '\n'.join(self.bad) \
